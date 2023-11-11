@@ -14,6 +14,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresPermission
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -86,6 +88,7 @@ class MainActivity : ComponentActivity() {
                     onStartServer = { viewModel.startServer() },
                     onStopServer = { viewModel.stopServer() }
                 )
+                NamesReceived(names = uiState.namesReceived)
             }
             else {
                 val launcher = rememberLauncherForActivityResult(contract = ActivityResultContracts.RequestMultiplePermissions()) { granted ->
@@ -113,6 +116,15 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    @Composable
+    fun NamesReceived(names: List<String>) {
+        LazyColumn {
+            items(names) { name ->
+                Text(name)
+            }
+        }
+    }
 }
 
 class ServerViewModel(application: Application): AndroidViewModel(application) {
@@ -120,6 +132,14 @@ class ServerViewModel(application: Application): AndroidViewModel(application) {
     val uiState = _uiState.asStateFlow()
 
     private val server: BluetoothCTFServer = BluetoothCTFServer(application)
+
+    init {
+        viewModelScope.launch {
+            server.namesReceived.collect { names ->
+                _uiState.update { it.copy(namesReceived = names) }
+            }
+        }
+    }
 
     @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_ADVERTISE, PERMISSION_BLUETOOTH_CONNECT])
     fun startServer() {
@@ -138,5 +158,6 @@ class ServerViewModel(application: Application): AndroidViewModel(application) {
 }
 
 data class ServerUIState(
-    val serverRunning: Boolean = false
+    val serverRunning: Boolean = false,
+    val namesReceived: List<String> = emptyList()
 )
