@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -31,13 +32,22 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tdcolvin.bleserver.ui.theme.BLEServerTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
-    private val allPermissions = arrayOf(
-        Manifest.permission.BLUETOOTH_CONNECT,
-        Manifest.permission.BLUETOOTH_ADVERTISE
-    )
+    private val allPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        arrayOf(
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE
+        )
+    }
+    else {
+        arrayOf(
+            Manifest.permission.BLUETOOTH_ADMIN,
+            Manifest.permission.BLUETOOTH
+        )
+    }
 
     private fun haveAllPermissions(context: Context): Boolean {
         return allPermissions
@@ -71,15 +81,11 @@ class MainActivity : ComponentActivity() {
 
         Column {
             if (allPermissionsGranted) {
-                Text("Permission granted")
-                if (uiState.serverRunning) {
-                    Text("Server running")
-                }
-                else {
-                    Button(onClick = { viewModel.startServer() }) {
-                        Text("Start server")
-                    }
-                }
+                ServerStatus(
+                    serverRunning = uiState.serverRunning,
+                    onStartServer = { viewModel.startServer() },
+                    onStopServer = { viewModel.stopServer() }
+                )
             }
             else {
                 val launcher = rememberLauncherForActivityResult(contract = ActivityResultContracts.RequestMultiplePermissions()) { granted ->
@@ -91,16 +97,42 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    @Composable
+    fun ServerStatus(serverRunning: Boolean, onStartServer: () -> Unit, onStopServer: () -> Unit) {
+        if (serverRunning) {
+            Text("Server running")
+            Button(onClick = onStopServer) {
+                Text("Stop server")
+            }
+        }
+        else {
+            Text("Server not running")
+            Button(onClick = onStartServer) {
+                Text("Start server")
+            }
+        }
+    }
 }
 
-class ServerViewModel(private val application: Application): AndroidViewModel(application) {
+class ServerViewModel(application: Application): AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(ServerUIState())
     val uiState = _uiState.asStateFlow()
 
-    @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT])
+    private val server: BluetoothCTFServer = BluetoothCTFServer(application)
+
+    @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_ADVERTISE, PERMISSION_BLUETOOTH_CONNECT])
     fun startServer() {
         viewModelScope.launch {
-            BluetoothCTFServer(application).createServerAndStartAdvertising()
+            server.startServer()
+            _uiState.update { it.copy(serverRunning = true) }
+        }
+    }
+    @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_ADVERTISE, PERMISSION_BLUETOOTH_CONNECT])
+    fun stopServer() {
+        viewModelScope.launch {
+            server.stopServer()
+            _uiState.update { it.copy(serverRunning = false) }
         }
     }
 }

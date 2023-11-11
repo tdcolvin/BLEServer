@@ -1,10 +1,8 @@
 package com.tdcolvin.bleserver
 
-import android.Manifest
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
@@ -14,12 +12,9 @@ import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
-import android.os.ParcelUuid
 import androidx.annotation.RequiresPermission
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import kotlin.coroutines.resume
@@ -27,6 +22,11 @@ import kotlin.coroutines.suspendCoroutine
 
 const val CTF_SERVICE_UUID = "e2f5f000-b11f-4623-b6b1-7d5373925267"
 const val CTF_CHARACTERISTIC_UUID = "8c380000-10bd-4fdb-ba21-1922d6cf860d"
+
+//These fields are marked as API >= 31 in the Manifest class, so we can't use those without warning.
+//So we create our own, which prevents over-suppression of the Linter
+const val PERMISSION_BLUETOOTH_ADVERTISE = "android.permission.BLUETOOTH_ADVERTISE"
+const val PERMISSION_BLUETOOTH_CONNECT = "android.permission.BLUETOOTH_CONNECT"
 
 class BluetoothCTFServer(private val context: Context) {
     private val bluetooth = context.getSystemService(Context.BLUETOOTH_SERVICE)
@@ -37,22 +37,34 @@ class BluetoothCTFServer(private val context: Context) {
     private val characteristicUuid = UUID.fromString(CTF_CHARACTERISTIC_UUID)
 
     private var server: BluetoothGattServer? = null
+    private var ctfService: BluetoothGattService? = null
 
     private var advertiseCallback: AdvertiseCallback? = null
     private val isServerListening: MutableStateFlow<Boolean?> = MutableStateFlow(null)
 
-    @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE])
-    suspend fun createServerAndStartAdvertising() = withContext(Dispatchers.IO) {
+    @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_CONNECT, PERMISSION_BLUETOOTH_ADVERTISE])
+    suspend fun startServer() = withContext(Dispatchers.IO) {
         //If server already exists, we don't need to create one
         if (server != null) {
             return@withContext
         }
 
+        startHandlingIncomingConnections()
         startAdvertising()
-        createServer()
     }
 
-    @RequiresPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
+    @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_CONNECT, PERMISSION_BLUETOOTH_ADVERTISE])
+    suspend fun stopServer() = withContext(Dispatchers.IO) {
+        //if no server, nothing to do
+        if (server == null) {
+            return@withContext
+        }
+
+        stopAdvertising()
+        stopHandlingIncomingConnections()
+    }
+
+    @RequiresPermission(PERMISSION_BLUETOOTH_ADVERTISE)
     private suspend fun startAdvertising() {
         val advertiser: BluetoothLeAdvertiser = bluetooth.adapter.bluetoothLeAdvertiser
             ?: throw Exception("This device is not able to advertise")
@@ -91,7 +103,7 @@ class BluetoothCTFServer(private val context: Context) {
         }
     }
 
-    @RequiresPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
+    @RequiresPermission(PERMISSION_BLUETOOTH_ADVERTISE)
     private fun stopAdvertising() {
         val advertiser: BluetoothLeAdvertiser = bluetooth.adapter.bluetoothLeAdvertiser
             ?: throw Exception("This device is not able to advertise")
@@ -103,31 +115,15 @@ class BluetoothCTFServer(private val context: Context) {
         }
     }
 
-    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    private fun createServer() {
+    @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
+    private fun startHandlingIncomingConnections() {
         server = bluetooth.openGattServer(context, object: BluetoothGattServerCallback() {
             override fun onServiceAdded(status: Int, service: BluetoothGattService?) {
                 super.onServiceAdded(status, service)
                 isServerListening.value = true
             }
 
-            @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-            override fun onDescriptorReadRequest(
-                device: BluetoothDevice,
-                requestId: Int,
-                offset: Int,
-                descriptor: BluetoothGattDescriptor
-            ) {
-                if (descriptor.uuid == characteristicUuid) {
-                    server?.sendResponse(device,
-                        requestId,
-                        BluetoothGatt.GATT_SUCCESS,
-                        0,
-                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                }
-            }
-
-            @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+            @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
             override fun onCharacteristicReadRequest(
                 device: BluetoothDevice?,
                 requestId: Int,
@@ -149,5 +145,14 @@ class BluetoothCTFServer(private val context: Context) {
 
         service.addCharacteristic(characteristic)
         server?.addService(service)
+        ctfService = service
+    }
+
+    @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
+    private fun stopHandlingIncomingConnections() {
+        ctfService?.let {
+            server?.removeService(it)
+            ctfService = null
+        }
     }
 }
