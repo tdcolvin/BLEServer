@@ -1,8 +1,10 @@
 package com.tdcolvin.bleserver
 
+import android.Manifest
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
@@ -24,6 +26,10 @@ import kotlin.coroutines.suspendCoroutine
 const val CTF_SERVICE_UUID = "8c380000-10bd-4fdb-ba21-1922d6cf860d"
 const val PASSWORD_CHARACTERISTIC_UUID = "8c380001-10bd-4fdb-ba21-1922d6cf860d"
 const val NAME_CHARACTERISTIC_UUID = "8c380002-10bd-4fdb-ba21-1922d6cf860d"
+const val FLAG_2_CHARACTERISTIC_UUID = "8c380003-10bd-4fdb-ba21-1922d6cf860d"
+
+// client characteristic configuration descriptor
+const val CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
 
 //These fields are marked as API >= 31 in the Manifest class, so we can't use those without warning.
 //So we create our own, which prevents over-suppression of the Linter
@@ -38,12 +44,14 @@ class BluetoothCTFServer(private val context: Context) {
     private val serviceUuid = UUID.fromString(CTF_SERVICE_UUID)
     private val passwordCharUuid = UUID.fromString(PASSWORD_CHARACTERISTIC_UUID)
     private val nameCharUuid = UUID.fromString(NAME_CHARACTERISTIC_UUID)
+    private val flag2CharUuid = UUID.fromString(FLAG_2_CHARACTERISTIC_UUID)
 
     private var server: BluetoothGattServer? = null
     private var ctfService: BluetoothGattService? = null
 
     private var advertiseCallback: AdvertiseCallback? = null
     private val isServerListening: MutableStateFlow<Boolean?> = MutableStateFlow(null)
+    private val devicesToNotify: MutableSet<BluetoothDevice> = mutableSetOf()
 
     private val preparedWrites = HashMap<Int, ByteArray>()
 
@@ -67,8 +75,26 @@ class BluetoothCTFServer(private val context: Context) {
             return@withContext
         }
 
+        devicesToNotify.clear()
+
         stopAdvertising()
         stopHandlingIncomingConnections()
+    }
+
+    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+    suspend fun sendNotification(notification: String) = withContext(Dispatchers.IO) {
+        val characteristic = ctfService?.getCharacteristic(flag2CharUuid)
+            ?: throw Exception("Characteristic not found")
+
+        characteristic.value = notification.encodeToByteArray()
+
+        devicesToNotify.forEach { device ->
+            server?.notifyCharacteristicChanged(
+                device,
+                characteristic,
+                false
+            )
+        }
     }
 
     @RequiresPermission(PERMISSION_BLUETOOTH_ADVERTISE)
@@ -125,6 +151,18 @@ class BluetoothCTFServer(private val context: Context) {
     @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
     private fun startHandlingIncomingConnections() {
         server = bluetooth.openGattServer(context, object: BluetoothGattServerCallback() {
+            override fun onConnectionStateChange(
+                device: BluetoothDevice,
+                status: Int,
+                newState: Int
+            ) {
+                super.onConnectionStateChange(device, status, newState)
+
+                if (newState == BluetoothGatt.STATE_DISCONNECTED) {
+                    devicesToNotify.remove(device)
+                }
+            }
+
             override fun onServiceAdded(status: Int, service: BluetoothGattService?) {
                 super.onServiceAdded(status, service)
                 isServerListening.value = true
@@ -138,7 +176,53 @@ class BluetoothCTFServer(private val context: Context) {
                 characteristic: BluetoothGattCharacteristic?
             ) {
                 super.onCharacteristicReadRequest(device, requestId, offset, characteristic)
-                server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, "HELLO".encodeToByteArray())
+                server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, "FLAG1:kangaroo".encodeToByteArray())
+            }
+
+            @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+            override fun onDescriptorWriteRequest(
+                device: BluetoothDevice,
+                requestId: Int,
+                descriptor: BluetoothGattDescriptor,
+                preparedWrite: Boolean,
+                responseNeeded: Boolean,
+                offset: Int,
+                value: ByteArray
+            ) {
+                super.onDescriptorWriteRequest(
+                    device,
+                    requestId,
+                    descriptor,
+                    preparedWrite,
+                    responseNeeded,
+                    offset,
+                    value
+                )
+
+                if (
+                    descriptor.uuid == UUID.fromString(CCCD_UUID) &&
+                    descriptor.characteristic.uuid == flag2CharUuid
+                ) {
+                    if (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
+                        devicesToNotify.add(device)
+                    }
+                    else if (value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)) {
+                        devicesToNotify.remove(device)
+                    }
+                    else {
+                        server?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+                        return
+                    }
+
+                    if (responseNeeded) {
+                        server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                        return
+                    }
+                }
+                else {
+                    server?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+                    return
+                }
             }
 
             @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
@@ -202,8 +286,21 @@ class BluetoothCTFServer(private val context: Context) {
             BluetoothGattCharacteristic.PERMISSION_WRITE
         )
 
+        val flag2Characteristic = BluetoothGattCharacteristic(
+            flag2CharUuid,
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        val cccDescriptor = BluetoothGattDescriptor(
+            UUID.fromString(CCCD_UUID),
+            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+        )
+        flag2Characteristic.addDescriptor(cccDescriptor)
+
         service.addCharacteristic(passwordCharacteristic)
         service.addCharacteristic(nameCharacteristic)
+        service.addCharacteristic(flag2Characteristic)
+
         server?.addService(service)
         ctfService = service
     }
